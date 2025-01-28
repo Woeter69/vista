@@ -1,5 +1,6 @@
 import gdown
 import os
+import argparse
 
 def download_from_drive(url, output_dir='data'):
     if not os.path.exists(output_dir):
@@ -14,6 +15,9 @@ def download_from_drive(url, output_dir='data'):
         print(f"Error downloading folder: {e}")
 
 if __name__ == "__main__":
-    # Replace with your actual Google Drive folder share link
-    DRIVE_FOLDER_URL = 'https://drive.google.com/drive/folders/YOUR_FOLDER_ID_HERE?usp=sharing'
-    download_from_drive(DRIVE_FOLDER_URL)
+    parser = argparse.ArgumentParser(description='Download a folder from Google Drive.')
+    parser.add_argument('url', type=str, help='The full Google Drive folder URL')
+    parser.add_argument('--output', type=str, default='data', help='Output directory (default: data)')
+    
+    args = parser.parse_args()
+    download_from_drive(args.url, args.output)

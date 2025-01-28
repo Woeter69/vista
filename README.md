@@ -14,9 +14,9 @@ To get started on Google Colab, follow these steps:
    ```
 3. Download the dataset from Google Drive:
    ```bash
-   python download_data.py
+   python download_data.py "https://drive.google.com/drive/folders/YOUR_FOLDER_ID_HERE?usp=sharing"
    ```
-   *Note: Ensure you have updated the `DRIVE_FOLDER_URL` in `download_data.py` with your shared folder link.*
+
 
 ## Local Development
 ...
