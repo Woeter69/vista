@@ -3,7 +3,7 @@
 ## Immediate Actions
 - [ ] **Data:** Locate and inspect the dataset (images and labels).
 - [ ] **EDA:** Analyze class distribution and image difficulty (as suggested in overview).
-- [ ] **Env:** Setup Python environment (PyTorch/TensorFlow, OpenCV, etc.).
+- [x] **Env:** Setup Python environment (PyTorch/TensorFlow, OpenCV, etc.).
 
 ## Modeling
 - [x] **Baseline:** Create a simple object detection/classification pipeline to verify submission format. (Created `train.py` with FasterRCNN)
