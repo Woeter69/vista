@@ -10,3 +10,4 @@ torchaudio
 albumentations
 pycocotools
 pillow
+gdown
