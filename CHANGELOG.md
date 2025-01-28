@@ -10,3 +10,5 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Updated `todolist.md` to reflect environment setup progress.
+- Optimized `train.py` for faster training (MobileNet option, 640px default).
+- Added Accuracy and Mean Dice metrics calculation per epoch.
