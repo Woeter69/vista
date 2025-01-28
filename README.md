@@ -16,7 +16,7 @@ To get started on Google Colab, follow these steps:
    ```bash
    python download_data.py
    ```
-   *Note: Ensure you have updated the `DRIVE_FOLDER_ID` in `download_data.py` if necessary.*
+   *Note: Ensure you have updated the `DRIVE_FOLDER_URL` in `download_data.py` with your shared folder link.*
 
 ## Local Development
 ...
