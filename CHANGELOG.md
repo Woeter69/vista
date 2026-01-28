@@ -10,6 +10,6 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Updated `todolist.md` to reflect environment setup progress.
-- Configured `train.py` to use ResNet50 FPN V2 by default.
-- Optimized `train.py` for speed: added 640px resizing, AMP (Mixed Precision), and persistent workers.
-- Added Accuracy and Mean Dice metrics calculation per epoch.
+- Configured `train.py` to use ResNet50 FPN V2 with LIGHTNING mode (256px, subsampling).
+- Implemented robust label mapping to resolve CUDA device-side assert errors.
+- Optimized `train.py` for maximum speed: added 256px resizing and training subsampling.
