@@ -12,9 +12,13 @@ To get started on Google Colab, follow these steps:
    ```bash
    pip install -r requirements.txt
    ```
-3. Download the dataset from Google Drive:
+3. Download the dataset file from Google Drive:
    ```bash
-   python download_data.py "https://drive.google.com/drive/folders/YOUR_FOLDER_ID_HERE?usp=sharing"
+   python download_data.py "https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing" --output dataset.zip
+   ```
+4. Unzip the dataset:
+   ```bash
+   unzip dataset.zip -d data/
    ```
 
 
