@@ -44,6 +44,23 @@ class VistaDataset(torch.utils.data.Dataset):
         
         json_name = "instances_train.json" if split == 'train' else "instances_test.json"
         self.ann_file = self._find_file(root, json_name)
+        
+        if not self.ann_file:
+            # Fallback: search for any .json file if the exact name isn't found
+            print(f"Warning: Could not find {json_name} in {root}. Searching for any JSON...")
+            for r, d, f in os.walk(root):
+                for file in f:
+                    if file.endswith('.json') and split in file.lower():
+                        self.ann_file = os.path.join(r, file)
+                        print(f"Found alternative: {self.ann_file}")
+                        break
+                if self.ann_file: break
+
+        if not self.ann_file:
+            print(f"CRITICAL ERROR: No annotation file found for {split} in {root}")
+            print(f"Available files in root: {os.listdir(root)}")
+            raise FileNotFoundError(f"Could not locate {json_name} in {root}")
+            
         self.img_dir = self._find_dir(root, split) or os.path.dirname(self.ann_file)
 
         with open(self.ann_file, 'r') as f:
@@ -64,12 +81,16 @@ class VistaDataset(torch.utils.data.Dataset):
 
     def _find_file(self, path, name):
         for r, d, f in os.walk(path):
-            if name in f: return os.path.join(r, name)
+            for file in f:
+                if file.lower() == name.lower():
+                    return os.path.join(r, file)
         return None
 
     def _find_dir(self, path, name):
         for r, d, f in os.walk(path):
-            if name in d: return os.path.join(r, name)
+            for folder in d:
+                if folder.lower() == name.lower():
+                    return os.path.join(r, folder)
         return None
 
     def load_image_and_boxes(self, index):
