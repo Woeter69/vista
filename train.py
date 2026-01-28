@@ -202,12 +202,19 @@ def main():
 
     start_epoch, best_acc = 0, 0
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
+    
     if args.resume and os.path.exists(last_ckpt_path):
+        print(f"Resuming from checkpoint found in: {last_ckpt_path}")
         ckpt = torch.load(last_ckpt_path, map_location=device)
-        model.load_state_dict(ckpt['model']); optimizer.load_state_dict(ckpt['optimizer'])
-        if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        if 'scheduler' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch = ckpt['epoch']
         best_acc = ckpt.get('acc', 0)
+        print(f"Successfully resumed from Epoch {start_epoch} (Best Acc so far: {best_acc:.4f})")
+    elif args.resume:
+        print(f"Warning: --resume was passed but no checkpoint was found at {last_ckpt_path}. Starting from scratch.")
 
     for epoch in range(start_epoch, args.epochs):
         model.train(); train_loss = 0
