@@ -136,7 +136,7 @@ class VistaDataset(torch.utils.data.Dataset):
             boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
             labels = torch.as_tensor(labels, dtype=torch.int64)
         
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
+        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([self.ids[index]])}
         return image, target
 
     def __len__(self):
@@ -191,8 +191,8 @@ def main():
     train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(), use_mosaic=args.mosaic)
     val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms())
     
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, pin_memory=True)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
     print(f"Loading Model: {args.model}")
     if args.model == 'resnet':
