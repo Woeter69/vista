@@ -7,7 +7,6 @@ import torch
 import torch.utils.data
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.retinanet import RetinaNetClassificationHead
 from PIL import Image
 from tqdm import tqdm
 import albumentations as A
@@ -137,7 +136,7 @@ class VistaDataset(torch.utils.data.Dataset):
             boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
             labels = torch.as_tensor(labels, dtype=torch.int64)
         
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([self.ids[index]])}
+        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
         return image, target
 
     def __len__(self):
@@ -176,7 +175,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
-    parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet', 'retinanet'])
+    parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr', default=0.0001, type=float)
@@ -198,17 +197,11 @@ def main():
     print(f"Loading Model: {args.model}")
     if args.model == 'resnet':
         model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
-        in_features = model.roi_heads.box_predictor.cls_score.in_features
-        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
-    elif args.model == 'mobilenet':
+    else:
         model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
-        in_features = model.roi_heads.box_predictor.cls_score.in_features
-        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
-    elif args.model == 'retinanet':
-        model = torchvision.models.detection.retinanet_resnet50_fpn_v2(weights="DEFAULT")
-        num_anchors = model.head.classification_head.num_anchors
-        model.head.classification_head = RetinaNetClassificationHead(256, num_anchors, 201)
-
+        
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
