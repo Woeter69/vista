@@ -76,10 +76,10 @@ class VistaDataset(torch.utils.data.Dataset):
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
-            if w > 1 and h > 1:
+            if w > 1.0 and h > 1.0: # Only keep boxes with actual area
                 boxes.append([x, y, x + w, y + h])
                 labels.append(ann['category_id'])
-        return image, np.array(boxes, dtype=np.float32), np.array(labels, dtype=np.int64), img_id
+        return image, np.array(boxes, dtype=np.float32).reshape(-1, 4), np.array(labels, dtype=np.int64), img_id
 
     def load_mosaic(self, index):
         indices = [index] + random.choices(range(len(self)), k=3)
@@ -118,7 +118,13 @@ class VistaDataset(torch.utils.data.Dataset):
         if len(mosaic_boxes) > 0:
             mosaic_boxes = np.concatenate(mosaic_boxes)
             mosaic_labels = np.concatenate(mosaic_labels)
-            np.clip(mosaic_boxes, 0, 2 * s, out=mosaic_boxes)
+            # Clip and then filter for valid boxes only
+            mosaic_boxes[:, [0, 2]] = np.clip(mosaic_boxes[:, [0, 2]], 0, 2 * s)
+            mosaic_boxes[:, [1, 3]] = np.clip(mosaic_boxes[:, [1, 3]], 0, 2 * s)
+            
+            valid = (mosaic_boxes[:, 2] > mosaic_boxes[:, 0] + 1.0) & (mosaic_boxes[:, 3] > mosaic_boxes[:, 1] + 1.0)
+            mosaic_boxes = mosaic_boxes[valid]
+            mosaic_labels = mosaic_labels[valid]
         else:
             mosaic_boxes = np.zeros((0, 4))
             mosaic_labels = np.zeros((0,))
