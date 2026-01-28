@@ -46,19 +46,15 @@ class VistaDataset(torch.utils.data.Dataset):
         self.ann_file = self._find_file(root, json_name)
         
         if not self.ann_file:
-            # Fallback: search for any .json file if the exact name isn't found
             print(f"Warning: Could not find {json_name} in {root}. Searching for any JSON...")
             for r, d, f in os.walk(root):
                 for file in f:
                     if file.endswith('.json') and split in file.lower():
                         self.ann_file = os.path.join(r, file)
-                        print(f"Found alternative: {self.ann_file}")
                         break
                 if self.ann_file: break
 
         if not self.ann_file:
-            print(f"CRITICAL ERROR: No annotation file found for {split} in {root}")
-            print(f"Available files in root: {os.listdir(root)}")
             raise FileNotFoundError(f"Could not locate {json_name} in {root}")
             
         self.img_dir = self._find_dir(root, split) or os.path.dirname(self.ann_file)
@@ -76,8 +72,9 @@ class VistaDataset(torch.utils.data.Dataset):
         for ann in data['annotations']:
             self.img_to_anns.setdefault(ann['image_id'], []).append(ann)
             
-        all_cats = sorted(list(set([ann['category_id'] for ann in data['annotations']]))) # noqa
-        self.cat_to_idx = {cat: i + 1 for i, cat in enumerate(all_cats)}
+        # FIXED: Use a hardcoded or globally sorted list of category IDs (1-200)
+        # This is CRITICAL. Without this, Train and Val IDs won't match.
+        self.cat_to_idx = {i: i for i in range(1, 201)} 
 
     def _find_file(self, path, name):
         for r, d, f in os.walk(path):
