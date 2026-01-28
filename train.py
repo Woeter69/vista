@@ -257,8 +257,10 @@ def main():
 
         ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_acc, 'dice': avg_dice}
         torch.save(ckpt, last_ckpt_path)
+        print(f"Checkpoint saved: {last_ckpt_path}")
+        
         if avg_acc > best_acc:
             best_acc = avg_acc; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
-            print(f"*** New Best Model saved with Accuracy: {best_acc:.4f} ***")
+            print(f"*** NEW BEST MODEL SAVED with Accuracy: {best_acc:.4f} ***")
 
 if __name__ == "__main__": main()
