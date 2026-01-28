@@ -7,25 +7,18 @@ import numpy as np
 import torch
 import torch.utils.data
 import torchvision
-from torchvision.models.detection import ssd300_vgg16, SSD300_VGG16_Weights
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 # -----------------------------------------------------------------------------
-# 1. GOD SPEED Transforms (320px - Super Fast)
+# 1. LIGHTNING Transforms (256px)
 # -----------------------------------------------------------------------------
-def get_train_transforms(img_size=320):
+def get_train_transforms(img_size=256):
     return A.Compose([
         A.Resize(img_size, img_size),
         A.HorizontalFlip(p=0.5),
-        A.ToFloat(max_value=255.0),
-        ToTensorV2(p=1.0)
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
-
-def get_valid_transforms(img_size=320):
-    return A.Compose([
-        A.Resize(img_size, img_size),
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -86,7 +79,8 @@ class VistaDataset(torch.utils.data.Dataset):
         else:
             image, boxes, labels = torchvision.transforms.functional.to_tensor(image), torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4), torch.as_tensor(labels, dtype=torch.int64)
             
-        return image, {"boxes": boxes, "labels": labels}
+        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
+        return image, target
 
     def __len__(self): return len(self.ids)
 
@@ -98,27 +92,26 @@ def main():
     parser.add_argument('--save-dir', default='./checkpoints')
     parser.add_argument('--batch-size', default=16, type=int)
     parser.add_argument('--epochs', default=20, type=int)
-    parser.add_argument('--lr', default=0.0001, type=float)
-    parser.add_argument('--train-limit', default=5000, type=int)
+    parser.add_argument('--lr', default=0.001, type=float)
+    parser.add_argument('--train-limit', default=2500, type=int)
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
 
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # GOD SPEED: No workers (0) to avoid Colab overhead, Small limit (5000)
-    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(320), limit=args.train_limit)
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn, pin_memory=True)
+    # LIGHTNING MODE: 2500 imgs per epoch, 256px resolution, 2 workers
+    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(256), limit=args.train_limit)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True)
 
-    print(f"GOD SPEED MODE: SSD300 | TrainLimit={args.train_limit} | ImgSize=320")
+    print(f"LIGHTNING MODE: FasterRCNN-ResNet50 | TrainLimit={args.train_limit} | ImgSize=256")
     
-    # SSD is significantly faster than Faster R-CNN
-    model = ssd300_vgg16(weights=SSD300_VGG16_Weights.DEFAULT)
-    # Adjust for 201 classes
-    model.head.classification_head.num_classes = 201
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
     model.to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.0005)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
