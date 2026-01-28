@@ -204,6 +204,11 @@ def main():
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    
+    # OneCycleLR is great for Faster R-CNN; it handles warmup and decay automatically
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs)
+    
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     start_epoch, best_acc = 0, 0
@@ -213,6 +218,7 @@ def main():
         ckpt = torch.load(last_ckpt_path, map_location=device)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
+        if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch = ckpt['epoch']
         best_acc = ckpt.get('acc', 0)
 
@@ -234,8 +240,10 @@ def main():
             else:
                 losses.backward()
                 optimizer.step()
+            
+            scheduler.step()
             train_loss += losses.item()
-            pbar.set_postfix(loss=losses.item())
+            pbar.set_postfix(loss=losses.item(), lr=optimizer.param_groups[0]['lr'])
 
         model.eval()
         total_val_acc, total_val_dice, val_count = 0, 0, 0
