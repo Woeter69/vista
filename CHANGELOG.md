@@ -10,5 +10,6 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Updated `todolist.md` to reflect environment setup progress.
-- Optimized `train.py` for faster training (MobileNet option, 640px default).
+- Configured `train.py` to use ResNet50 FPN V2 by default.
+- Reverted to default image sizes (removed forced 640px resize).
 - Added Accuracy and Mean Dice metrics calculation per epoch.
