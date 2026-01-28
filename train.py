@@ -147,7 +147,34 @@ class VistaDataset(torch.utils.data.Dataset):
 
 def collate_fn(batch): return tuple(zip(*batch))
 
-def main():
+# -----------------------------------------------------------------------------
+# 3. Metrics (Accuracy & Dice)
+# -----------------------------------------------------------------------------
+def calculate_metrics(preds, targets):
+    total_dice, total_acc, count = 0, 0, 0
+    for p, t in zip(preds, targets):
+        if len(t['boxes']) == 0: continue
+        if len(p['boxes']) == 0:
+            count += 1
+            continue
+        
+        # Compute IoU between predicted and ground truth boxes
+        iou = torchvision.ops.box_iou(p['boxes'], t['boxes'])
+        max_iou, matched_idx = iou.max(dim=1)
+        
+        # Dice approx for boxes: 2*IoU / (1 + IoU)
+        dice = (2 * max_iou) / (1 + max_iou + 1e-6)
+        total_dice += dice.mean().item()
+        
+        # Accuracy: correct class if IoU > 0.5
+        correct = (p['labels'].cpu() == t['labels'].cpu()[matched_idx]) & (max_iou.cpu() > 0.5)
+        total_acc += correct.float().mean().item()
+        count += 1
+    return (total_acc / count, total_dice / count) if count > 0 else (0, 0)
+
+# -----------------------------------------------------------------------------
+# 4. Main
+# -----------------------------------------------------------------------------
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
@@ -207,6 +234,29 @@ def main():
             pbar.set_postfix(loss=f"{losses.item()*args.accum:.4f}")
 
         print(f"Epoch {epoch+1} Results: Avg Loss: {train_loss/len(train_loader):.4f}")
-        torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'epoch': epoch+1}, last_ckpt_path)
+        
+        # --- Validation Step ---
+        model.eval()
+        total_val_acc, total_val_dice, val_count = 0, 0, 0
+        print(f"Validating Epoch {epoch+1}...")
+        with torch.no_grad():
+            for images, targets in val_loader:
+                images = [img.to(device) for img in images]
+                outputs = model(images)
+                acc, dice = calculate_metrics(outputs, targets)
+                total_val_acc += acc
+                total_val_dice += dice
+                val_count += 1
+        
+        avg_acc = total_val_acc / val_count
+        avg_dice = total_val_dice / val_count
+        print(f"Epoch {epoch+1} Metrics: Acc: {avg_acc:.4f} | Dice: {avg_dice:.4f}")
+
+        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_acc, 'dice': avg_dice}
+        torch.save(ckpt, last_ckpt_path)
+        if avg_acc > best_acc:
+            best_acc = avg_acc; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
+            print(f"New Best Model saved (Acc: {best_acc:.4f})")
+
 
 if __name__ == "__main__": main()
