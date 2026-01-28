@@ -7,6 +7,7 @@ import torch
 import torch.utils.data
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.retinanet import RetinaNetClassificationHead
 from PIL import Image
 from tqdm import tqdm
 import albumentations as A
@@ -30,7 +31,7 @@ def get_valid_transforms():
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
 # -----------------------------------------------------------------------------
-# 2. Dataset (with optional Mosaic)
+# 2. Dataset
 # -----------------------------------------------------------------------------
 class VistaDataset(torch.utils.data.Dataset):
     def __init__(self, root, split='train', transforms=None, use_mosaic=False, img_size=1024):
@@ -175,9 +176,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
-    parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
+    parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet', 'retinanet'])
     parser.add_argument('--batch-size', default=4, type=int)
-    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr', default=0.0001, type=float)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--mosaic', action='store_true')
@@ -194,21 +195,24 @@ def main():
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
+    print(f"Loading Model: {args.model}")
     if args.model == 'resnet':
         model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
-    else:
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
+    elif args.model == 'mobilenet':
         model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
-        
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
+    elif args.model == 'retinanet':
+        model = torchvision.models.detection.retinanet_resnet50_fpn_v2(weights="DEFAULT")
+        num_anchors = model.head.classification_head.num_anchors
+        model.head.classification_head = RetinaNetClassificationHead(256, num_anchors, 201)
+
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    
-    # OneCycleLR is great for Faster R-CNN; it handles warmup and decay automatically
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs)
-    
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader), epochs=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     start_epoch, best_acc = 0, 0
@@ -240,7 +244,6 @@ def main():
             else:
                 losses.backward()
                 optimizer.step()
-            
             scheduler.step()
             train_loss += losses.item()
             pbar.set_postfix(loss=losses.item(), lr=optimizer.param_groups[0]['lr'])
@@ -259,7 +262,7 @@ def main():
         avg_val_acc = total_val_acc / val_count
         print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f} | Dice: {total_val_dice/val_count:.4f}")
 
-        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'acc': avg_val_acc}
+        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_val_acc}
         torch.save(ckpt, last_ckpt_path)
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
