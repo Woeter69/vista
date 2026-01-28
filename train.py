@@ -13,7 +13,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 # -----------------------------------------------------------------------------
-# 1. Transforms (Removed forced resize to use default image sizes)
+# 1. Transforms
 # -----------------------------------------------------------------------------
 def get_train_transforms():
     return A.Compose([
@@ -120,11 +120,13 @@ def calculate_metrics(preds, targets):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
+    parser.add_argument('--save-dir', default='./checkpoints')
     parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
-    parser.add_argument('--batch-size', default=4, type=int) # Lowered for ResNet memory
+    parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--epochs', default=10, type=int)
     args = parser.parse_args()
 
+    os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
     train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms())
@@ -134,10 +136,10 @@ def main():
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
     if args.model == 'resnet':
-        print("Using ResNet50 FPN V2 (Default)...")
+        print("Using ResNet50 FPN V2...")
         model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
     else:
-        print("Using MobileNetV3-Large (Fast)...")
+        print("Using MobileNetV3-Large...")
         model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
         
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -147,6 +149,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
+    best_acc = 0
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
@@ -173,16 +176,37 @@ def main():
 
         # Validation
         model.eval()
-        val_acc, val_dice = 0, 0
+        total_val_acc, total_val_dice, val_count = 0, 0, 0
         with torch.no_grad():
             for images, targets in val_loader:
                 images = [img.to(device) for img in images]
                 outputs = model(images)
                 acc, dice = calculate_metrics(outputs, targets)
-                val_acc += acc
-                val_dice += dice
+                total_val_acc += acc
+                total_val_dice += dice
+                val_count += 1
         
-        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {val_acc/len(val_loader):.4f} | Dice: {val_dice/len(val_loader):.4f}")
+        avg_val_acc = total_val_acc / val_count
+        avg_val_dice = total_val_dice / val_count
+        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f} | Dice: {avg_val_dice:.4f}")
+
+        # Save Checkpoints
+        ckpt = {
+            'epoch': epoch + 1,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'acc': avg_val_acc,
+            'dice': avg_val_dice
+        }
+        
+        # Last model
+        torch.save(ckpt, os.path.join(args.save_dir, "last_model.pt"))
+        
+        # Best model
+        if avg_val_acc > best_acc:
+            best_acc = avg_val_acc
+            torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
+            print(f"New Best Model saved (Acc: {best_acc:.4f})")
 
 if __name__ == "__main__":
     main()
