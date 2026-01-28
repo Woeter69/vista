@@ -24,7 +24,7 @@ def get_train_transforms(img_size=256):
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
 # -----------------------------------------------------------------------------
-# 2. Dataset
+# 2. Dataset (with Automatic Label Mapping)
 # -----------------------------------------------------------------------------
 class VistaDataset(torch.utils.data.Dataset):
     def __init__(self, root, split='train', transforms=None, limit=None):
@@ -46,6 +46,12 @@ class VistaDataset(torch.utils.data.Dataset):
         self.img_to_anns = {}
         for ann in data['annotations']:
             self.img_to_anns.setdefault(ann['image_id'], []).append(ann)
+            
+        # IMPORTANT: Map non-contiguous category IDs to [1, 200]
+        # This prevents the CUDA device-side assert error
+        all_cats = sorted(list(set([ann['category_id'] for ann in data['annotations']])))
+        self.cat_to_idx = {cat: i + 1 for i, cat in enumerate(all_cats)}
+        print(f"[{split.upper()}] Mapped {len(all_cats)} categories to range [1, {len(all_cats)}]")
 
     def _find_file(self, path, name):
         for r, d, f in os.walk(path):
@@ -61,7 +67,6 @@ class VistaDataset(torch.utils.data.Dataset):
         img_id = self.ids[index]
         img_data = self.img_info[img_id]
         path = os.path.join(self.img_dir, img_data['file_name'])
-        
         image = cv2.imread(path)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
@@ -71,7 +76,8 @@ class VistaDataset(torch.utils.data.Dataset):
             bx, by, bw, bh = ann['bbox']
             if bw > 1 and bh > 1:
                 boxes.append([bx, by, bx + bw, by + bh])
-                labels.append(ann['category_id'])
+                # Use the mapped index
+                labels.append(self.cat_to_idx[ann['category_id']])
 
         if self.transforms:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
@@ -79,8 +85,7 @@ class VistaDataset(torch.utils.data.Dataset):
         else:
             image, boxes, labels = torchvision.transforms.functional.to_tensor(image), torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4), torch.as_tensor(labels, dtype=torch.int64)
             
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
-        return image, target
+        return image, {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
 
     def __len__(self): return len(self.ids)
 
@@ -100,15 +105,12 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # LIGHTNING MODE: 2500 imgs per epoch, 256px resolution, 2 workers
     train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(256), limit=args.train_limit)
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True)
 
     print(f"LIGHTNING MODE: FasterRCNN-ResNet50 | TrainLimit={args.train_limit} | ImgSize=256")
-    
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
+    model.roi_heads.box_predictor = FastRCNNPredictor(model.roi_heads.box_predictor.cls_score.in_features, 201)
     model.to(device)
 
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=0.0005)
@@ -116,27 +118,22 @@ def main():
 
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
     if args.resume and os.path.exists(last_ckpt_path):
+        print("Resuming...")
         ckpt = torch.load(last_ckpt_path, map_location=device)
         model.load_state_dict(ckpt['model'])
 
     for epoch in range(args.epochs):
-        model.train()
-        train_loss = 0
+        model.train(); train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
         for images, targets in pbar:
-            images = [img.to(device) for img in images]
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-            
+            images = [img.to(device) for img in images]; targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             optimizer.zero_grad()
             with torch.amp.autocast('cuda', enabled=(scaler is not None)):
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
-            
             if scaler: scaler.scale(losses).backward(); scaler.step(optimizer); scaler.update()
             else: losses.backward(); optimizer.step()
-            
-            train_loss += losses.item()
-            pbar.set_postfix(loss=f"{losses.item():.4f}")
+            train_loss += losses.item(); pbar.set_postfix(loss=f"{losses.item():.4f}")
 
         print(f"Epoch {epoch+1} Results: Avg Loss: {train_loss/len(train_loader):.4f}")
         torch.save({'model': model.state_dict(), 'epoch': epoch+1}, last_ckpt_path)
