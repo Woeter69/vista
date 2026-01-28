@@ -59,7 +59,7 @@ class VistaDataset(torch.utils.data.Dataset):
         for ann in data['annotations']:
             self.img_to_anns.setdefault(ann['image_id'], []).append(ann)
             
-        all_cats = sorted(list(set([ann['category_id'] for ann in data['annotations']])))
+        all_cats = sorted(list(set([ann['category_id'] for ann in data['annotations']]))) # noqa
         self.cat_to_idx = {cat: i + 1 for i, cat in enumerate(all_cats)}
 
     def _find_file(self, path, name):
@@ -98,7 +98,6 @@ class VistaDataset(torch.utils.data.Dataset):
             img, boxes, labels, img_id = self.load_image_and_boxes(idx)
             if i == 0: main_img_id = img_id
             h, w = img.shape[:2]
-            # Resizing to standard size before mosaic helps math
             img = cv2.resize(img, (s, s))
             if len(boxes) > 0:
                 boxes[:, [0, 2]] *= (s / w)
@@ -124,7 +123,6 @@ class VistaDataset(torch.utils.data.Dataset):
             mosaic_boxes, mosaic_labels = mosaic_boxes[valid], mosaic_labels[valid]
         else: mosaic_boxes, mosaic_labels = np.zeros((0, 4)), np.zeros((0,))
         
-        # Resize mosaic back to single s size
         mosaic_img = cv2.resize(mosaic_img, (s, s))
         mosaic_boxes *= 0.5
         return mosaic_img, mosaic_boxes, mosaic_labels, main_img_id
@@ -158,15 +156,10 @@ def calculate_metrics(preds, targets):
             count += 1
             continue
         
-        # Compute IoU between predicted and ground truth boxes
         iou = torchvision.ops.box_iou(p['boxes'], t['boxes'])
         max_iou, matched_idx = iou.max(dim=1)
-        
-        # Dice approx for boxes: 2*IoU / (1 + IoU)
         dice = (2 * max_iou) / (1 + max_iou + 1e-6)
         total_dice += dice.mean().item()
-        
-        # Accuracy: correct class if IoU > 0.5
         correct = (p['labels'].cpu() == t['labels'].cpu()[matched_idx]) & (max_iou.cpu() > 0.5)
         total_acc += correct.float().mean().item()
         count += 1
@@ -175,6 +168,7 @@ def calculate_metrics(preds, targets):
 # -----------------------------------------------------------------------------
 # 4. Main
 # -----------------------------------------------------------------------------
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
@@ -206,12 +200,16 @@ def calculate_metrics(preds, targets):
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader)//args.accum, epochs=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
+    start_epoch, best_acc = 0, 0
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
     if args.resume and os.path.exists(last_ckpt_path):
         ckpt = torch.load(last_ckpt_path, map_location=device)
         model.load_state_dict(ckpt['model']); optimizer.load_state_dict(ckpt['optimizer'])
+        if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
+        start_epoch = ckpt['epoch']
+        best_acc = ckpt.get('acc', 0)
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train(); train_loss = 0
         optimizer.zero_grad()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
@@ -233,12 +231,10 @@ def calculate_metrics(preds, targets):
             train_loss += losses.item() * args.accum
             pbar.set_postfix(loss=f"{losses.item()*args.accum:.4f}")
 
-        print(f"Epoch {epoch+1} Results: Avg Loss: {train_loss/len(train_loader):.4f}")
-        
         # --- Validation Step ---
         model.eval()
         total_val_acc, total_val_dice, val_count = 0, 0, 0
-        print(f"Validating Epoch {epoch+1}...")
+        print(f"Calculating Accuracy and Dice for Epoch {epoch+1}...")
         with torch.no_grad():
             for images, targets in val_loader:
                 images = [img.to(device) for img in images]
@@ -250,13 +246,19 @@ def calculate_metrics(preds, targets):
         
         avg_acc = total_val_acc / val_count
         avg_dice = total_val_dice / val_count
-        print(f"Epoch {epoch+1} Metrics: Acc: {avg_acc:.4f} | Dice: {avg_dice:.4f}")
+        
+        # This is what you requested: telling you the results after every epoch
+        print(f"\n" + "="*40)
+        print(f"EPOCH {epoch+1} COMPLETE")
+        print(f"Average Loss: {train_loss/len(train_loader):.4f}")
+        print(f"Accuracy:     {avg_acc:.4f}")
+        print(f"Mean Dice:    {avg_dice:.4f}")
+        print("="*40 + "\n")
 
         ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_acc, 'dice': avg_dice}
         torch.save(ckpt, last_ckpt_path)
         if avg_acc > best_acc:
             best_acc = avg_acc; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
-            print(f"New Best Model saved (Acc: {best_acc:.4f})")
-
+            print(f"*** New Best Model saved with Accuracy: {best_acc:.4f} ***")
 
 if __name__ == "__main__": main()
