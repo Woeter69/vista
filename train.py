@@ -30,13 +30,15 @@ def get_valid_transforms():
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
 # -----------------------------------------------------------------------------
-# 2. Dataset
+# 2. Dataset (with optional Mosaic)
 # -----------------------------------------------------------------------------
 class VistaDataset(torch.utils.data.Dataset):
-    def __init__(self, root, split='train', transforms=None):
+    def __init__(self, root, split='train', transforms=None, use_mosaic=False, img_size=1024):
         self.root = root
         self.split = split
         self.transforms = transforms
+        self.use_mosaic = use_mosaic
+        self.img_size = img_size
         
         json_name = "instances_train.json" if split == 'train' else "instances_test.json"
         self.ann_file = self._find_file(root, json_name)
@@ -63,11 +65,10 @@ class VistaDataset(torch.utils.data.Dataset):
             if name in d: return os.path.join(r, name)
         return None
 
-    def __getitem__(self, index):
+    def load_image_and_boxes(self, index):
         img_id = self.ids[index]
         img_data = self.img_info[img_id]
         path = os.path.join(self.img_dir, img_data['file_name'])
-        
         image = np.array(Image.open(path).convert("RGB"))
         anns = self.img_to_anns.get(img_id, [])
         boxes, labels = [], []
@@ -76,14 +77,66 @@ class VistaDataset(torch.utils.data.Dataset):
             if w > 1 and h > 1:
                 boxes.append([x, y, x + w, y + h])
                 labels.append(ann['category_id'])
+        return image, np.array(boxes, dtype=np.float32), np.array(labels, dtype=np.int64)
+
+    def load_mosaic(self, index):
+        indices = [index] + random.choices(range(len(self)), k=3)
+        s = self.img_size
+        mosaic_img = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
+        mosaic_boxes, mosaic_labels = [], []
+        yc, xc = s, s
+
+        for i, idx in enumerate(indices):
+            img, boxes, labels = self.load_image_and_boxes(idx)
+            h, w = img.shape[:2]
+            if i == 0:
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+            elif i == 1:
+                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+            elif i == 2:
+                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(yc + h, s * 2)
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(h, y2a - y1a)
+            elif i == 3:
+                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(yc + h, s * 2)
+                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(h, y2a - y1a)
+
+            mosaic_img[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
+            pad_w, pad_h = x1a - x1b, y1a - y1b
+            if len(boxes) > 0:
+                boxes[:, [0, 2]] += pad_w
+                boxes[:, [1, 3]] += pad_h
+                mosaic_boxes.append(boxes)
+                mosaic_labels.append(labels)
+
+        if len(mosaic_boxes) > 0:
+            mosaic_boxes = np.concatenate(mosaic_boxes)
+            mosaic_labels = np.concatenate(mosaic_labels)
+            np.clip(mosaic_boxes, 0, 2 * s, out=mosaic_boxes)
+        else:
+            mosaic_boxes = np.zeros((0, 4))
+            mosaic_labels = np.zeros((0,))
+        
+        return mosaic_img, mosaic_boxes, mosaic_labels
+
+    def __getitem__(self, index):
+        if self.split == 'train' and self.use_mosaic and random.random() < 0.5:
+            image, boxes, labels = self.load_mosaic(index)
+        else:
+            image, boxes, labels = self.load_image_and_boxes(index)
 
         if self.transforms:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
             image = transformed['image']
             boxes = torch.as_tensor(transformed['bboxes'], dtype=torch.float32).reshape(-1, 4)
             labels = torch.as_tensor(transformed['labels'], dtype=torch.int64)
+        else:
+            image = torchvision.transforms.functional.to_tensor(image)
+            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
+            labels = torch.as_tensor(labels, dtype=torch.int64)
         
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
+        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([self.ids[index]])}
         return image, target
 
     def __len__(self):
@@ -93,7 +146,7 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 # -----------------------------------------------------------------------------
-# 3. Metrics (Accuracy & Dice)
+# 3. Metrics
 # -----------------------------------------------------------------------------
 def calculate_metrics(preds, targets):
     total_dice, total_acc, count = 0, 0, 0
@@ -102,67 +155,78 @@ def calculate_metrics(preds, targets):
         if len(p['boxes']) == 0:
             count += 1
             continue
-        
         iou = torchvision.ops.box_iou(p['boxes'], t['boxes'])
         max_iou, matched_idx = iou.max(dim=1)
-        
         dice = (2 * max_iou) / (1 + max_iou + 1e-6)
         total_dice += dice.mean().item()
-        
         correct = (p['labels'] == t['labels'][matched_idx]) & (max_iou > 0.5)
         total_acc += correct.float().mean().item()
         count += 1
     return (total_acc / count, total_dice / count) if count > 0 else (0, 0)
 
 # -----------------------------------------------------------------------------
-# 4. Training & Evaluation
+# 4. Main
 # -----------------------------------------------------------------------------
+def setup_colab():
+    if not os.path.exists('/content/drive'):
+        print("Warning: Google Drive not mounted.")
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
     parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
     parser.add_argument('--batch-size', default=4, type=int)
-    parser.add_argument('--epochs', default=10, type=int)
+    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--lr', default=0.0001, type=float)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--mosaic', action='store_true')
+    parser.add_argument('--colab', action='store_true')
     args = parser.parse_args()
 
+    if args.colab: setup_colab()
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
-    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms())
+    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(), use_mosaic=args.mosaic)
     val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms())
     
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
     if args.model == 'resnet':
-        print("Using ResNet50 FPN V2...")
         model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
     else:
-        print("Using MobileNetV3-Large...")
         model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
         
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
     model.to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
-    best_acc = 0
-    for epoch in range(args.epochs):
+    start_epoch, best_acc = 0, 0
+    last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
+    if args.resume and os.path.exists(last_ckpt_path):
+        print(f"Resuming from {last_ckpt_path}...")
+        ckpt = torch.load(last_ckpt_path, map_location=device)
+        model.load_state_dict(ckpt['model'])
+        optimizer.load_state_dict(ckpt['optimizer'])
+        start_epoch = ckpt['epoch']
+        best_acc = ckpt.get('acc', 0)
+
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
         for images, targets in pbar:
             images = [img.to(device) for img in images]
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-            
             optimizer.zero_grad()
             with torch.amp.autocast('cuda', enabled=(scaler is not None)):
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
-            
             if scaler:
                 scaler.scale(losses).backward()
                 scaler.step(optimizer)
@@ -170,11 +234,9 @@ def main():
             else:
                 losses.backward()
                 optimizer.step()
-            
             train_loss += losses.item()
             pbar.set_postfix(loss=losses.item())
 
-        # Validation
         model.eval()
         total_val_acc, total_val_dice, val_count = 0, 0, 0
         with torch.no_grad():
@@ -187,22 +249,10 @@ def main():
                 val_count += 1
         
         avg_val_acc = total_val_acc / val_count
-        avg_val_dice = total_val_dice / val_count
-        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f} | Dice: {avg_val_dice:.4f}")
+        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f} | Dice: {total_val_dice/val_count:.4f}")
 
-        # Save Checkpoints
-        ckpt = {
-            'epoch': epoch + 1,
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'acc': avg_val_acc,
-            'dice': avg_val_dice
-        }
-        
-        # Last model
-        torch.save(ckpt, os.path.join(args.save_dir, "last_model.pt"))
-        
-        # Best model
+        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'acc': avg_val_acc}
+        torch.save(ckpt, last_ckpt_path)
         if avg_val_acc > best_acc:
             best_acc = avg_val_acc
             torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
