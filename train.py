@@ -25,6 +25,8 @@ def get_train_transforms():
 
 def get_valid_transforms():
     return A.Compose([
+        # Added a NoOp to ensure bbox processor always has a transform to run
+        A.NoOp(), 
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -77,7 +79,7 @@ class VistaDataset(torch.utils.data.Dataset):
             if w > 1 and h > 1:
                 boxes.append([x, y, x + w, y + h])
                 labels.append(ann['category_id'])
-        return image, np.array(boxes, dtype=np.float32), np.array(labels, dtype=np.int64)
+        return image, np.array(boxes, dtype=np.float32), np.array(labels, dtype=np.int64), img_id
 
     def load_mosaic(self, index):
         indices = [index] + random.choices(range(len(self)), k=3)
@@ -86,8 +88,11 @@ class VistaDataset(torch.utils.data.Dataset):
         mosaic_boxes, mosaic_labels = [], []
         yc, xc = s, s
 
+        main_img_id = None
         for i, idx in enumerate(indices):
-            img, boxes, labels = self.load_image_and_boxes(idx)
+            img, boxes, labels, img_id = self.load_image_and_boxes(idx)
+            if i == 0: main_img_id = img_id
+            
             h, w = img.shape[:2]
             if i == 0:
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
@@ -118,13 +123,13 @@ class VistaDataset(torch.utils.data.Dataset):
             mosaic_boxes = np.zeros((0, 4))
             mosaic_labels = np.zeros((0,))
         
-        return mosaic_img, mosaic_boxes, mosaic_labels
+        return mosaic_img, mosaic_boxes, mosaic_labels, main_img_id
 
     def __getitem__(self, index):
         if self.split == 'train' and self.use_mosaic and random.random() < 0.5:
-            image, boxes, labels = self.load_mosaic(index)
+            image, boxes, labels, img_id = self.load_mosaic(index)
         else:
-            image, boxes, labels = self.load_image_and_boxes(index)
+            image, boxes, labels, img_id = self.load_image_and_boxes(index)
 
         if self.transforms:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
@@ -136,7 +141,7 @@ class VistaDataset(torch.utils.data.Dataset):
             boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
             labels = torch.as_tensor(labels, dtype=torch.int64)
         
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([self.ids[index]])}
+        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
         return image, target
 
     def __len__(self):
