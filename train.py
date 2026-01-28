@@ -180,7 +180,15 @@ def main():
     parser.add_argument('--mosaic', action='store_true')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--colab', action='store_true')
+    parser.add_argument('--kaggle', action='store_true')
     args = parser.parse_args()
+
+    if args.kaggle:
+        args.data_dir = "/kaggle/input/vista-dataset" if args.data_dir == "/content/vista_data/" else args.data_dir
+        args.save_dir = "/kaggle/working/checkpoints" if args.save_dir == "./checkpoints" else args.save_dir
+        print("Running in Kaggle environment.")
+    elif args.colab:
+        setup_colab()
 
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
