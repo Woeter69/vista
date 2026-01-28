@@ -13,20 +13,20 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 # -----------------------------------------------------------------------------
-# 1. Transforms
+# 1. Faster Transforms (Resize to 640 for 4x speedup)
 # -----------------------------------------------------------------------------
-def get_train_transforms():
+def get_train_transforms(img_size=640):
     return A.Compose([
+        A.Resize(img_size, img_size),
         A.HorizontalFlip(p=0.5),
         A.RandomBrightnessContrast(p=0.2),
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
-def get_valid_transforms():
+def get_valid_transforms(img_size=640):
     return A.Compose([
-        # Added a NoOp to ensure bbox processor always has a transform to run
-        A.NoOp(), 
+        A.Resize(img_size, img_size),
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -35,7 +35,7 @@ def get_valid_transforms():
 # 2. Dataset
 # -----------------------------------------------------------------------------
 class VistaDataset(torch.utils.data.Dataset):
-    def __init__(self, root, split='train', transforms=None, use_mosaic=False, img_size=1024):
+    def __init__(self, root, split='train', transforms=None, use_mosaic=False, img_size=640):
         self.root = root
         self.split = split
         self.transforms = transforms
@@ -76,7 +76,7 @@ class VistaDataset(torch.utils.data.Dataset):
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
-            if w > 1.0 and h > 1.0: # Only keep boxes with actual area
+            if w > 1.0 and h > 1.0:
                 boxes.append([x, y, x + w, y + h])
                 labels.append(ann['category_id'])
         return image, np.array(boxes, dtype=np.float32).reshape(-1, 4), np.array(labels, dtype=np.int64), img_id
@@ -87,12 +87,10 @@ class VistaDataset(torch.utils.data.Dataset):
         mosaic_img = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
         mosaic_boxes, mosaic_labels = [], []
         yc, xc = s, s
-
         main_img_id = None
         for i, idx in enumerate(indices):
             img, boxes, labels, img_id = self.load_image_and_boxes(idx)
             if i == 0: main_img_id = img_id
-            
             h, w = img.shape[:2]
             if i == 0:
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
@@ -106,7 +104,6 @@ class VistaDataset(torch.utils.data.Dataset):
             elif i == 3:
                 x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(yc + h, s * 2)
                 x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(h, y2a - y1a)
-
             mosaic_img[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
             pad_w, pad_h = x1a - x1b, y1a - y1b
             if len(boxes) > 0:
@@ -114,21 +111,16 @@ class VistaDataset(torch.utils.data.Dataset):
                 boxes[:, [1, 3]] += pad_h
                 mosaic_boxes.append(boxes)
                 mosaic_labels.append(labels)
-
         if len(mosaic_boxes) > 0:
             mosaic_boxes = np.concatenate(mosaic_boxes)
             mosaic_labels = np.concatenate(mosaic_labels)
-            # Clip and then filter for valid boxes only
             mosaic_boxes[:, [0, 2]] = np.clip(mosaic_boxes[:, [0, 2]], 0, 2 * s)
             mosaic_boxes[:, [1, 3]] = np.clip(mosaic_boxes[:, [1, 3]], 0, 2 * s)
-            
             valid = (mosaic_boxes[:, 2] > mosaic_boxes[:, 0] + 1.0) & (mosaic_boxes[:, 3] > mosaic_boxes[:, 1] + 1.0)
             mosaic_boxes = mosaic_boxes[valid]
             mosaic_labels = mosaic_labels[valid]
         else:
-            mosaic_boxes = np.zeros((0, 4))
-            mosaic_labels = np.zeros((0,))
-        
+            mosaic_boxes, mosaic_labels = np.zeros((0, 4)), np.zeros((0,))
         return mosaic_img, mosaic_boxes, mosaic_labels, main_img_id
 
     def __getitem__(self, index):
@@ -136,17 +128,11 @@ class VistaDataset(torch.utils.data.Dataset):
             image, boxes, labels, img_id = self.load_mosaic(index)
         else:
             image, boxes, labels, img_id = self.load_image_and_boxes(index)
-
         if self.transforms:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
-            image = transformed['image']
-            boxes = torch.as_tensor(transformed['bboxes'], dtype=torch.float32).reshape(-1, 4)
-            labels = torch.as_tensor(transformed['labels'], dtype=torch.int64)
+            image, boxes, labels = transformed['image'], torch.as_tensor(transformed['bboxes'], dtype=torch.float32).reshape(-1, 4), torch.as_tensor(transformed['labels'], dtype=torch.int64)
         else:
-            image = torchvision.transforms.functional.to_tensor(image)
-            boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
-        
+            image, boxes, labels = torchvision.transforms.functional.to_tensor(image), torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4), torch.as_tensor(labels, dtype=torch.int64)
         target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([img_id])}
         return image, target
 
@@ -178,41 +164,31 @@ def calculate_metrics(preds, targets):
 # -----------------------------------------------------------------------------
 # 4. Main
 # -----------------------------------------------------------------------------
-def setup_colab():
-    if not os.path.exists('/content/drive'):
-        print("Warning: Google Drive not mounted.")
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--save-dir', default='./checkpoints')
     parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
-    parser.add_argument('--batch-size', default=4, type=int)
+    parser.add_argument('--batch-size', default=8, type=int)
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr', default=0.0001, type=float)
+    parser.add_argument('--img-size', default=640, type=int)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--mosaic', action='store_true')
     parser.add_argument('--colab', action='store_true')
     args = parser.parse_args()
 
-    if args.colab: setup_colab()
     os.makedirs(args.save_dir, exist_ok=True)
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
-    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(), use_mosaic=args.mosaic)
-    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms())
+    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(args.img_size), use_mosaic=args.mosaic, img_size=args.img_size)
+    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms(args.img_size), img_size=args.img_size)
     
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True, persistent_workers=True)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn, persistent_workers=True)
 
-    print(f"Loading Model: {args.model}")
-    if args.model == 'resnet':
-        model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
-    else:
-        model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
-        
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT") if args.model == 'resnet' else torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
+    model.roi_heads.box_predictor = FastRCNNPredictor(model.roi_heads.box_predictor.cls_score.in_features, 201)
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -222,17 +198,13 @@ def main():
     start_epoch, best_acc = 0, 0
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
     if args.resume and os.path.exists(last_ckpt_path):
-        print(f"Resuming from {last_ckpt_path}...")
         ckpt = torch.load(last_ckpt_path, map_location=device)
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
+        model.load_state_dict(ckpt['model']); optimizer.load_state_dict(ckpt['optimizer'])
         if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
-        start_epoch = ckpt['epoch']
-        best_acc = ckpt.get('acc', 0)
+        start_epoch, best_acc = ckpt['epoch'], ckpt.get('acc', 0)
 
     for epoch in range(start_epoch, args.epochs):
-        model.train()
-        train_loss = 0
+        model.train(); train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
         for images, targets in pbar:
             images = [img.to(device) for img in images]
@@ -242,35 +214,25 @@ def main():
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
             if scaler:
-                scaler.scale(losses).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                scaler.scale(losses).backward(); scaler.step(optimizer); scaler.update()
             else:
-                losses.backward()
-                optimizer.step()
-            scheduler.step()
-            train_loss += losses.item()
-            pbar.set_postfix(loss=losses.item(), lr=optimizer.param_groups[0]['lr'])
+                losses.backward(); optimizer.step()
+            scheduler.step(); train_loss += losses.item()
+            pbar.set_postfix(loss=f"{losses.item():.4f}", lr=f"{optimizer.param_groups[0]['lr']:.6f}")
 
-        model.eval()
-        total_val_acc, total_val_dice, val_count = 0, 0, 0
+        model.eval(); total_val_acc, val_count = 0, 0
         with torch.no_grad():
             for images, targets in val_loader:
                 images = [img.to(device) for img in images]
-                outputs = model(images)
-                acc, dice = calculate_metrics(outputs, targets)
-                total_val_acc += acc
-                total_val_dice += dice
-                val_count += 1
+                acc, _ = calculate_metrics(model(images), targets)
+                total_val_acc += acc; val_count += 1
         
         avg_val_acc = total_val_acc / val_count
-        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f} | Dice: {total_val_dice/val_count:.4f}")
-
+        print(f"Epoch {epoch+1} Results: Loss: {train_loss/len(train_loader):.4f} | Acc: {avg_val_acc:.4f}")
         ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_val_acc}
         torch.save(ckpt, last_ckpt_path)
         if avg_val_acc > best_acc:
-            best_acc = avg_val_acc
-            torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
+            best_acc = avg_val_acc; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
             print(f"New Best Model saved (Acc: {best_acc:.4f})")
 
 if __name__ == "__main__":
