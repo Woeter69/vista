@@ -13,20 +13,18 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 # -----------------------------------------------------------------------------
-# 1. Faster Transforms
+# 1. Transforms (Removed forced resize to use default image sizes)
 # -----------------------------------------------------------------------------
-def get_train_transforms(img_size=640):
+def get_train_transforms():
     return A.Compose([
-        A.Resize(img_size, img_size),
         A.HorizontalFlip(p=0.5),
         A.RandomBrightnessContrast(p=0.2),
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
-def get_valid_transforms(img_size=640):
+def get_valid_transforms():
     return A.Compose([
-        A.Resize(img_size, img_size),
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -108,11 +106,9 @@ def calculate_metrics(preds, targets):
         iou = torchvision.ops.box_iou(p['boxes'], t['boxes'])
         max_iou, matched_idx = iou.max(dim=1)
         
-        # Dice approx for boxes: 2*IoU / (1 + IoU)
         dice = (2 * max_iou) / (1 + max_iou + 1e-6)
         total_dice += dice.mean().item()
         
-        # Accuracy: correct class if IoU > 0.5
         correct = (p['labels'] == t['labels'][matched_idx]) & (max_iou > 0.5)
         total_acc += correct.float().mean().item()
         count += 1
@@ -124,27 +120,28 @@ def calculate_metrics(preds, targets):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', required=True)
-    parser.add_argument('--model', default='mobilenet', choices=['resnet', 'mobilenet'])
-    parser.add_argument('--batch-size', default=8, type=int)
+    parser.add_argument('--model', default='resnet', choices=['resnet', 'mobilenet'])
+    parser.add_argument('--batch-size', default=4, type=int) # Lowered for ResNet memory
     parser.add_argument('--epochs', default=10, type=int)
-    parser.add_argument('--img-size', default=640, type=int)
     args = parser.parse_args()
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     
-    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(args.img_size))
-    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms(args.img_size))
+    train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms())
+    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms())
     
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-    if args.model == 'mobilenet':
-        model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(pretrained=True)
+    if args.model == 'resnet':
+        print("Using ResNet50 FPN V2 (Default)...")
+        model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
     else:
-        model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(pretrained=True)
+        print("Using MobileNetV3-Large (Fast)...")
+        model = torchvision.models.detection.fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
         
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201) # 200 classes + bg
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
