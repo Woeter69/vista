@@ -156,11 +156,22 @@ def calculate_metrics(preds, targets):
             count += 1
             continue
         
-        iou = torchvision.ops.box_iou(p['boxes'], t['boxes'])
+        # Ensure boxes are on CPU for torchvision metrics calculation
+        p_boxes = p['boxes'].detach().cpu()
+        t_boxes = t['boxes'].detach().cpu()
+        p_labels = p['labels'].detach().cpu()
+        t_labels = t['labels'].detach().cpu()
+        
+        # Compute IoU between predicted and ground truth boxes
+        iou = torchvision.ops.box_iou(p_boxes, t_boxes)
         max_iou, matched_idx = iou.max(dim=1)
+        
+        # Dice approx for boxes: 2*IoU / (1 + IoU)
         dice = (2 * max_iou) / (1 + max_iou + 1e-6)
         total_dice += dice.mean().item()
-        correct = (p['labels'].cpu() == t['labels'].cpu()[matched_idx]) & (max_iou.cpu() > 0.5)
+        
+        # Accuracy: correct class if IoU > 0.5
+        correct = (p_labels == t_labels[matched_idx]) & (max_iou > 0.5)
         total_acc += correct.float().mean().item()
         count += 1
     return (total_acc / count, total_dice / count) if count > 0 else (0, 0)
