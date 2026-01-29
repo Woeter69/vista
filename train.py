@@ -22,16 +22,13 @@ def get_train_transforms():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        # Color/Noise
         A.OneOf([
             A.MotionBlur(p=1),
             A.MedianBlur(blur_limit=3, p=1),
             A.Blur(blur_limit=3, p=1),
         ], p=0.3),
         A.HueSaturationValue(p=0.3),
-        # Geometric
         A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.3),
-        # Convert to float [0, 1] and then to Tensor
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -53,10 +50,15 @@ class VistaDataset(torch.utils.data.Dataset):
         self.use_mosaic = use_mosaic
         self.img_size = img_size
         
+        if not os.path.exists(root):
+            raise FileNotFoundError(f"Directory not found: {root}")
+
         json_name = "instances_train.json" if split == 'train' else "instances_test.json"
         self.ann_file = self._find_file(root, json_name)
+        
         if not self.ann_file:
-            raise FileNotFoundError(f"Could not find {json_name} in {root}")
+            print(f"Content of {root}: {os.listdir(root)}")
+            raise FileNotFoundError(f"Could not find {json_name} in {root}. Check if unzip was successful.")
         
         self.img_dir = self._find_dir(root, split)
         if not self.img_dir:
@@ -79,8 +81,6 @@ class VistaDataset(torch.utils.data.Dataset):
         return None
 
     def _find_dir(self, search_path, dirname):
-        possible = os.path.join(search_path, dirname)
-        if os.path.isdir(possible): return possible
         for root, dirs, files in os.walk(search_path):
             if dirname in dirs: return os.path.join(root, dirname)
         return None
@@ -196,9 +196,9 @@ def collate_fn(batch):
 # -----------------------------------------------------------------------------
 def setup_colab():
     if os.path.exists('/content/drive/MyDrive'):
-        print("✅ Google Drive detected and mounted.")
+        print("Confirmed: Google Drive detected and mounted.")
     else:
-        print("⚠️ Warning: Google Drive not detected. Please mount it in a cell first.")
+        print("Warning: Google Drive not detected. Please mount it in a cell first.")
 
 # -----------------------------------------------------------------------------
 # 4. Main Training Loop
@@ -217,15 +217,21 @@ def main():
 
     if args.colab: setup_colab()
     if not torch.cuda.is_available():
-        print("❌ ERROR: CUDA (GPU) not detected!")
+        print("ERROR: CUDA (GPU) not detected!")
         return
 
     device = torch.device('cuda')
-    print(f"🚀 Device: {device} | Mosaic: {args.mosaic} | AMP: True")
+    print(f"Status: Device={device} | Mosaic={args.mosaic} | AMP=True")
 
-    train_ds = VistaDataset(args.data_dir, split='train', transforms=get_train_transforms(), use_mosaic=args.mosaic)
+    try:
+        train_ds = VistaDataset(args.data_dir, split='train', transforms=get_train_transforms(), use_mosaic=args.mosaic)
+    except Exception as e:
+        print(f"Dataset initialization failed: {e}")
+        return
+
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True)
 
+    print("Loading Model (ResNet50 FPN V2)...")
     weights = FasterRCNN_ResNet50_FPN_V2_Weights.DEFAULT
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights=weights)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
@@ -238,7 +244,7 @@ def main():
 
     start_epoch, best_loss = 0, float('inf')
     if args.resume and os.path.exists("last_run.pt"):
-        print("Resuming...")
+        print("Resuming from checkpoint...")
         ckpt = torch.load("last_run.pt", map_location=device)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
@@ -265,7 +271,7 @@ def main():
 
         lr_scheduler.step()
         avg_loss = epoch_loss / len(train_loader)
-        print(f"Avg Loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch+1} Complete. Avg Loss: {avg_loss:.4f}")
         ckpt = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'lr_scheduler': lr_scheduler.state_dict(), 'scaler': scaler.state_dict(), 'epoch': epoch, 'best_loss': best_loss}
         torch.save(ckpt, "last_run.pt")
         if avg_loss < best_loss:
