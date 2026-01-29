@@ -1,0 +1,25 @@
+# Environments
+env/
+venv/
+.env
+
+# Data
+data/
+*.csv
+*.json
+!submission_format.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Jupyter
+.ipynb_checkpoints
+
+# IDEs
+.vscode/
+.idea/
