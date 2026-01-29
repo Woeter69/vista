@@ -238,12 +238,12 @@ def collate_fn(batch):
 # 3. Setup Helper
 # -----------------------------------------------------------------------------
 def setup_colab():
-    try:
-        from google.colab import drive
-        print("Mounting Google Drive...")
-        drive.mount('/content/drive')
-    except ImportError:
-        pass
+    """Checks if Google Drive is already mounted."""
+    if os.path.exists('/content/drive/MyDrive'):
+        print("✅ Google Drive detected and mounted.")
+    else:
+        print("⚠️ Warning: Google Drive not detected at /content/drive/MyDrive.")
+        print("Please run 'from google.colab import drive; drive.mount(\"/content/drive\")' in a notebook cell.")
 
 # -----------------------------------------------------------------------------
 # 4. Main Training Loop
