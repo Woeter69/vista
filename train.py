@@ -22,13 +22,16 @@ def get_train_transforms():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
+        # Color/Noise
         A.OneOf([
             A.MotionBlur(p=1),
             A.MedianBlur(blur_limit=3, p=1),
             A.Blur(blur_limit=3, p=1),
         ], p=0.3),
         A.HueSaturationValue(p=0.3),
+        # Geometric
         A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.3),
+        # Convert to float [0, 1] and then to Tensor
         A.ToFloat(max_value=255.0),
         ToTensorV2(p=1.0)
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
@@ -206,22 +209,30 @@ def setup_colab():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', default='/content/drive/MyDrive/vista', help='Dataset root')
+    parser.add_argument('--save-dir', default='.', help='Where to save checkpoints')
     parser.add_argument('--epochs', default=50, type=int)
     parser.add_argument('--batch-size', default=4, type=int)
-    parser.add_argument('--lr', default=0.005, type=float)
+    parser.add_argument('--lr', default=0.01, type=float)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--colab', action='store_true')
     parser.add_argument('--num-classes', default=201, type=int)
     parser.add_argument('--mosaic', action='store_true')
+    parser.add_argument('--warmup-iters', default=1000, type=int)
     args = parser.parse_args()
 
     if args.colab: setup_colab()
+    
+    # Ensure save directory exists
+    os.makedirs(args.save_dir, exist_ok=True)
+    last_ckpt_path = os.path.join(args.save_dir, "last_run.pt")
+    best_ckpt_path = os.path.join(args.save_dir, "best_model.pt")
+
     if not torch.cuda.is_available():
         print("ERROR: CUDA (GPU) not detected!")
         return
 
     device = torch.device('cuda')
-    print(f"Status: Device={device} | Mosaic={args.mosaic} | AMP=True")
+    print(f"Status: Device={device} | Mosaic={args.mosaic} | SaveDir={args.save_dir}")
 
     try:
         train_ds = VistaDataset(args.data_dir, split='train', transforms=get_train_transforms(), use_mosaic=args.mosaic)
@@ -239,46 +250,62 @@ def main():
     model.to(device)
 
     optimizer = torch.optim.SGD([p for p in model.parameters() if p.requires_grad], lr=args.lr, momentum=0.9, weight_decay=0.0005)
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=5, T_mult=2)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
     scaler = torch.amp.GradScaler('cuda')
 
     start_epoch, best_loss = 0, float('inf')
-    if args.resume and os.path.exists("last_run.pt"):
-        print("Resuming from checkpoint...")
-        ckpt = torch.load("last_run.pt", map_location=device)
+    total_iters = 0
+    if args.resume and os.path.exists(last_ckpt_path):
+        print(f"Resuming from {last_ckpt_path}...")
+        ckpt = torch.load(last_ckpt_path, map_location=device)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
         if 'scaler' in ckpt: scaler.load_state_dict(ckpt['scaler'])
         start_epoch, best_loss = ckpt['epoch'] + 1, ckpt.get('best_loss', float('inf'))
+        total_iters = start_epoch * len(train_loader)
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
         epoch_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for images, targets in pbar:
+            if total_iters < args.warmup_iters:
+                lr_factor = (total_iters + 1) / args.warmup_iters
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_factor * args.lr
+            
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            
             with torch.amp.autocast('cuda'):
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
+            
             optimizer.zero_grad()
             scaler.scale(losses).backward()
             scaler.step(optimizer)
             scaler.update()
+            
             epoch_loss += losses.item()
+            total_iters += 1
             pbar.set_postfix({'Loss': f"{losses.item():.4f}", 'LR': f"{optimizer.param_groups[0]['lr']:.6f}"})
 
-        lr_scheduler.step()
+        if total_iters >= args.warmup_iters:
+            lr_scheduler.step()
+        
         avg_loss = epoch_loss / len(train_loader)
         print(f"Epoch {epoch+1} Complete. Avg Loss: {avg_loss:.4f}")
         ckpt = {'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'lr_scheduler': lr_scheduler.state_dict(), 'scaler': scaler.state_dict(), 'epoch': epoch, 'best_loss': best_loss}
-        torch.save(ckpt, "last_run.pt")
+        
+        torch.save(ckpt, last_ckpt_path)
+        print(f"Saved checkpoint to {last_ckpt_path}")
+        
         if avg_loss < best_loss:
             best_loss = avg_loss
             ckpt['best_loss'] = best_loss
-            torch.save(ckpt, "best_model.pt")
-            print(f"Saved Best Model (Loss: {best_loss:.4f})")
+            torch.save(ckpt, best_ckpt_path)
+            print(f"Saved Best Model to {best_ckpt_path} (Loss: {best_loss:.4f})")
 
 if __name__ == "__main__":
     main()
