@@ -164,41 +164,56 @@ class VistaDataset(torch.utils.data.Dataset):
 def collate_fn(batch): return tuple(zip(*batch))
 
 # -----------------------------------------------------------------------------
-# 3. Metrics (Accuracy & Dice)
+# 3. Official Hackathon Metric (IIT BHU Codefest '26)
 # -----------------------------------------------------------------------------
-def calculate_metrics(preds, targets):
-    total_dice, total_acc, count = 0, 0, 0
+def calculate_metrics(preds, targets, threshold=0.5):
+    """
+    Official Metric: If predicted count != ground truth count, score is 0.
+    Else, score is (correctly identified objects) / total objects.
+    """
+    total_score = 0
+    count = 0
+    
     for p, t in zip(preds, targets):
-        if len(t['boxes']) == 0: continue
+        mask = p['scores'] > threshold
+        p_labels = p['labels'][mask].detach().cpu().tolist()
+        t_labels = t['labels'].detach().cpu().tolist()
         
-        # FILTER: Only look at detections with > 0.5 confidence
-        # This prevents low-confidence noise from pulling down your accuracy
-        mask = p['scores'] > 0.5
-        p_boxes = p['boxes'][mask].detach().cpu()
-        p_labels = p['labels'][mask].detach().cpu()
+        # RULE: Exact count required
+        if len(p_labels) != len(t_labels):
+            total_score += 0 
+        else:
+            # Calculate match score (intersection of multiset)
+            matches = 0
+            temp_t = t_labels.copy()
+            for label in p_labels:
+                if label in temp_t:
+                    matches += 1
+                    temp_t.remove(label)
+            total_score += matches / len(t_labels) if len(t_labels) > 0 else 1.0
         
-        t_boxes = t['boxes'].detach().cpu()
-        t_labels = t['labels'].detach().cpu()
-        
-        if len(p_boxes) == 0:
-            # If model found nothing but there were objects, acc is 0
-            count += 1
-            continue
-        
-        # Compute IoU
-        iou = torchvision.ops.box_iou(p_boxes, t_boxes)
-        max_iou, matched_idx = iou.max(dim=1)
-        
-        # Dice: 2*IoU / (1 + IoU)
-        dice = (2 * max_iou) / (1 + max_iou + 1e-6)
-        total_dice += dice.mean().item()
-        
-        # Accuracy: correct class IF box overlap is > 0.5
-        correct = (p_labels == t_labels[matched_idx]) & (max_iou > 0.5)
-        total_acc += correct.float().mean().item()
         count += 1
         
-    return (total_acc / count, total_dice / count) if count > 0 else (0, 0)
+    return total_score / count if count > 0 else 0
+
+def find_best_threshold(model, val_loader, device):
+    """Find the threshold that maximizes the hackathon score."""
+    model.eval()
+    thresholds = [0.3, 0.4, 0.5, 0.6, 0.7]
+    scores = {t: 0 for t in thresholds}
+    
+    print("Optimizing confidence threshold...")
+    with torch.no_grad():
+        # Use a small subset for speed
+        for i, (images, targets) in enumerate(val_loader):
+            if i > 20: break 
+            images = [img.to(device) for img in images]
+            outputs = model(images)
+            for t in thresholds:
+                scores[t] += calculate_metrics(outputs, targets, threshold=t)
+    
+    best_t = max(scores, key=scores.get)
+    return best_t, scores[best_t] / min(len(val_loader), 21)
 
 # -----------------------------------------------------------------------------
 # 4. Main
@@ -292,37 +307,23 @@ def main():
             
             train_loss += losses.item() * args.accum
             pbar.set_postfix(loss=f"{losses.item()*args.accum:.4f}")
-
-        # --- Validation Step ---
+        # --- Official Validation Step ---
         model.eval()
-        total_val_acc, total_val_dice, val_count = 0, 0, 0
-        print(f"Calculating Accuracy and Dice for Epoch {epoch+1}...")
-        with torch.no_grad():
-            for images, targets in val_loader:
-                images = [img.to(device) for img in images]
-                outputs = model(images)
-                acc, dice = calculate_metrics(outputs, targets)
-                total_val_acc += acc
-                total_val_dice += dice
-                val_count += 1
+        best_t, official_score = find_best_threshold(model, val_loader, device)
         
-        avg_acc = total_val_acc / val_count
-        avg_dice = total_val_dice / val_count
-        
-        # This is what you requested: telling you the results after every epoch
         print(f"\n" + "="*40)
         print(f"EPOCH {epoch+1} COMPLETE")
-        print(f"Average Loss: {train_loss/len(train_loader):.4f}")
-        print(f"Accuracy:     {avg_acc:.4f}")
-        print(f"Mean Dice:    {avg_dice:.4f}")
+        print(f"Average Train Loss: {train_loss/len(train_loader):.4f}")
+        print(f"Official Codefest Score: {official_score:.4f} (at threshold {best_t})")
         print("="*40 + "\n")
 
-        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), 'acc': avg_acc, 'dice': avg_dice}
+        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 
+                'scheduler': scheduler.state_dict(), 'acc': official_score, 'best_t': best_t}
         torch.save(ckpt, last_ckpt_path)
         print(f"Checkpoint saved: {last_ckpt_path}")
         
-        if avg_acc > best_acc:
-            best_acc = avg_acc; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
-            print(f"*** NEW BEST MODEL SAVED with Accuracy: {best_acc:.4f} ***")
+        if official_score > best_acc:
+            best_acc = official_score; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
+            print(f"*** NEW BEST MODEL SAVED with Codefest Score: {best_acc:.4f} ***")
 
 if __name__ == "__main__": main()
