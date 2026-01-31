@@ -170,28 +170,34 @@ def calculate_metrics(preds, targets):
     total_dice, total_acc, count = 0, 0, 0
     for p, t in zip(preds, targets):
         if len(t['boxes']) == 0: continue
-        if len(p['boxes']) == 0:
+        
+        # FILTER: Only look at detections with > 0.5 confidence
+        # This prevents low-confidence noise from pulling down your accuracy
+        mask = p['scores'] > 0.5
+        p_boxes = p['boxes'][mask].detach().cpu()
+        p_labels = p['labels'][mask].detach().cpu()
+        
+        t_boxes = t['boxes'].detach().cpu()
+        t_labels = t['labels'].detach().cpu()
+        
+        if len(p_boxes) == 0:
+            # If model found nothing but there were objects, acc is 0
             count += 1
             continue
         
-        # Ensure boxes are on CPU for torchvision metrics calculation
-        p_boxes = p['boxes'].detach().cpu()
-        t_boxes = t['boxes'].detach().cpu()
-        p_labels = p['labels'].detach().cpu()
-        t_labels = t['labels'].detach().cpu()
-        
-        # Compute IoU between predicted and ground truth boxes
+        # Compute IoU
         iou = torchvision.ops.box_iou(p_boxes, t_boxes)
         max_iou, matched_idx = iou.max(dim=1)
         
-        # Dice approx for boxes: 2*IoU / (1 + IoU)
+        # Dice: 2*IoU / (1 + IoU)
         dice = (2 * max_iou) / (1 + max_iou + 1e-6)
         total_dice += dice.mean().item()
         
-        # Accuracy: correct class if IoU > 0.5
+        # Accuracy: correct class IF box overlap is > 0.5
         correct = (p_labels == t_labels[matched_idx]) & (max_iou > 0.5)
         total_acc += correct.float().mean().item()
         count += 1
+        
     return (total_acc / count, total_dice / count) if count > 0 else (0, 0)
 
 # -----------------------------------------------------------------------------
