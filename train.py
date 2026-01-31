@@ -235,6 +235,10 @@ def main():
     parser.add_argument('--kaggle', action='store_true')
     args = parser.parse_args()
 
+    # --- Setup Device ---
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print(f"Using device: {device}")
+
     # ... [setup code] ...
     
     train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(args.img_size), use_mosaic=args.mosaic, img_size=args.img_size)
