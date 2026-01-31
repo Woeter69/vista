@@ -105,49 +105,53 @@ class VistaDataset(torch.utils.data.Dataset):
                 labels.append(self.cat_to_idx[ann['category_id']])
         return image, np.array(boxes, dtype=np.float32).reshape(-1, 4), np.array(labels, dtype=np.int64), img_id
 
-    def load_mosaic(self, index):
-        indices = [index] + random.choices(range(len(self)), k=3)
+    def load_mega_mosaic(self, index):
+        """
+        Winning Feature: Take 12 random single-object images and tile them into a 4x3 grid.
+        This forces the model to learn multi-object scenes (avg 12 objects) like the test set.
+        """
+        rows, cols = 4, 3
+        indices = [index] + random.choices(range(len(self)), k=(rows * cols) - 1)
         s = self.img_size
-        mosaic_img = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
+        
+        # Sub-image size
+        sw, sh = s // cols, s // rows
+        mosaic_img = np.full((s, s, 3), 114, dtype=np.uint8)
         mosaic_boxes, mosaic_labels = [], []
-        yc, xc = s, s
-        main_img_id = None
+        
         for i, idx in enumerate(indices):
-            img, boxes, labels, img_id = self.load_image_and_boxes(idx)
-            if i == 0: main_img_id = img_id
-            h, w = img.shape[:2]
-            img = cv2.resize(img, (s, s))
-            if len(boxes) > 0:
-                boxes[:, [0, 2]] *= (s / w)
-                boxes[:, [1, 3]] *= (s / h)
-            h, w = s, s
+            img, boxes, labels, _ = self.load_image_and_boxes(idx)
+            img = cv2.resize(img, (sw, sh))
             
-            if i == 0: x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b = max(xc-w,0), max(yc-h,0), xc, yc, w-(xc-max(xc-w,0)), h-(yc-max(yc-h,0)), w, h
-            elif i == 1: x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b = xc, max(yc-h,0), min(xc+w,s*2), yc, 0, h-(yc-max(yc-h,0)), min(w, min(xc+w,s*2)-xc), h
-            elif i == 2: x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b = max(xc-w,0), yc, xc, min(yc+h,s*2), w-(xc-max(xc-w,0)), 0, w, min(h, min(yc+h,s*2)-yc)
-            else: x1a, y1a, x2a, y2a, x1b, y1b, x2b, y2b = xc, yc, min(xc+w,s*2), min(yc+h,s*2), 0, 0, min(w, min(xc+w,s*2)-xc), min(h, min(yc+h,s*2)-yc)
+            # Position in grid
+            r, c = i // cols, i % cols
+            x1, y1 = c * sw, r * sh
             
-            mosaic_img[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
-            pad_w, pad_h = x1a - x1b, y1a - y1b
+            mosaic_img[y1:y1+sh, x1:x1+sw] = img
+            
             if len(boxes) > 0:
-                boxes[:, [0, 2]] += pad_w; boxes[:, [1, 3]] += pad_h
-                mosaic_boxes.append(boxes); mosaic_labels.append(labels)
+                # Scale boxes to sub-image size and shift to grid position
+                orig_h, orig_w = self.img_info[self.ids[idx]]['height'], self.img_info[self.ids[idx]]['width']
+                boxes[:, [0, 2]] *= (sw / orig_w)
+                boxes[:, [1, 3]] *= (sh / orig_h)
+                boxes[:, [0, 2]] += x1
+                boxes[:, [1, 3]] += y1
+                mosaic_boxes.append(boxes)
+                mosaic_labels.append(labels)
         
         if len(mosaic_boxes) > 0:
             mosaic_boxes = np.concatenate(mosaic_boxes); mosaic_labels = np.concatenate(mosaic_labels)
-            mosaic_boxes[:, [0, 2]] = np.clip(mosaic_boxes[:, [0, 2]], 0, 2 * s)
-            mosaic_boxes[:, [1, 3]] = np.clip(mosaic_boxes[:, [1, 3]], 0, 2 * s)
-            valid = (mosaic_boxes[:, 2] > mosaic_boxes[:, 0] + 1.0) & (mosaic_boxes[:, 3] > mosaic_boxes[:, 1] + 1.0)
-            mosaic_boxes, mosaic_labels = mosaic_boxes[valid], mosaic_labels[valid]
-        else: mosaic_boxes, mosaic_labels = np.zeros((0, 4)), np.zeros((0,))
-        
-        mosaic_img = cv2.resize(mosaic_img, (s, s))
-        mosaic_boxes *= 0.5
-        return mosaic_img, mosaic_boxes, mosaic_labels, main_img_id
+        else:
+            mosaic_boxes, mosaic_labels = np.zeros((0, 4)), np.zeros((0,))
+            
+        return mosaic_img, mosaic_boxes, mosaic_labels, self.ids[index]
 
     def __getitem__(self, index):
-        if self.split == 'train' and self.use_mosaic and random.random() < 0.5:
-            image, boxes, labels, img_id = self.load_mosaic(index)
+        # Increased probability to 80% to force the model to learn multi-object scenes
+        if self.split == 'train' and self.use_mosaic and random.random() < 0.8:
+            image, boxes, labels, img_id = self.load_mega_mosaic(index)
+        else:
+            image, boxes, labels, img_id = self.load_image_and_boxes(index)
         else:
             image, boxes, labels, img_id = self.load_image_and_boxes(index)
         
