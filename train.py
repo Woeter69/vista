@@ -275,14 +275,20 @@ def main():
         
         if found_path:
             print(f"Resuming from: {found_path}")
-            ckpt = torch.load(found_path, map_location=device)
-            model.load_state_dict(ckpt['model'])
-            optimizer.load_state_dict(ckpt['optimizer'])
-            if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
-            start_epoch = ckpt['epoch']
-            # CRITICAL: Load the best_acc from the checkpoint so we can compare against it
-            best_acc = ckpt.get('acc', 0.0)
-            print(f"Successfully resumed from Epoch {start_epoch} (Previous Best Acc: {best_acc:.4f})")
+            try:
+                ckpt = torch.load(found_path, map_location=device)
+                model.load_state_dict(ckpt['model'])
+                optimizer.load_state_dict(ckpt['optimizer'])
+                if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
+                start_epoch = ckpt['epoch']
+                # CRITICAL: Load the best_acc from the checkpoint so we can compare against it
+                best_acc = ckpt.get('acc', 0.0)
+                print(f"Successfully resumed from Epoch {start_epoch} (Previous Best Acc: {best_acc:.4f})")
+            except Exception as e:
+                print(f"Error loading checkpoint: {e}")
+                print("Warning: Checkpoint architecture mismatch or corruption detected. Starting fresh.")
+                start_epoch = 0
+                best_acc = 0.0
         else:
             print(f"Warning: --resume was passed but last.pth was not found anywhere. Starting fresh.")
 
