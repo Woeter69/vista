@@ -258,7 +258,7 @@ def main():
 
     start_epoch = 0
     best_acc = 0.0 # Track the best accuracy globally
-    last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
+    last_ckpt_path = os.path.join(args.save_dir, "last.pth")
     
     # --- Smart Resume Logic ---
     if args.resume:
@@ -269,8 +269,8 @@ def main():
             # Kaggle specific: search for model in inputs if not in working dir
             print(f"Searching for checkpoint in Kaggle inputs...")
             for r, d, f in os.walk("/kaggle/input"):
-                if "last_model.pt" in f:
-                    found_path = os.path.join(r, "last_model.pt")
+                if "last.pth" in f:
+                    found_path = os.path.join(r, "last.pth")
                     break
         
         if found_path:
@@ -284,7 +284,7 @@ def main():
             best_acc = ckpt.get('acc', 0.0)
             print(f"Successfully resumed from Epoch {start_epoch} (Previous Best Acc: {best_acc:.4f})")
         else:
-            print(f"Warning: --resume was passed but last_model.pt was not found anywhere. Starting fresh.")
+            print(f"Warning: --resume was passed but last.pth was not found anywhere. Starting fresh.")
 
     for epoch in range(start_epoch, args.epochs):
         model.train(); train_loss = 0
