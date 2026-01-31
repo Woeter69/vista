@@ -152,8 +152,6 @@ class VistaDataset(torch.utils.data.Dataset):
             image, boxes, labels, img_id = self.load_mega_mosaic(index)
         else:
             image, boxes, labels, img_id = self.load_image_and_boxes(index)
-        else:
-            image, boxes, labels, img_id = self.load_image_and_boxes(index)
         
         if self.transforms:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
