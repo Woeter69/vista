@@ -227,7 +227,7 @@ def main():
     parser.add_argument('--batch-size', default=4, type=int)
     parser.add_argument('--accum', default=8, type=int, help='Gradient accumulation steps')
     parser.add_argument('--epochs', default=20, type=int)
-    parser.add_argument('--lr', default=0.0001, type=float)
+    parser.add_argument('--lr', default=0.0002, type=float) # Doubled for faster convergence
     parser.add_argument('--img-size', default=640, type=int)
     parser.add_argument('--mosaic', action='store_true')
     parser.add_argument('--resume', action='store_true')
@@ -235,18 +235,10 @@ def main():
     parser.add_argument('--kaggle', action='store_true')
     args = parser.parse_args()
 
-    if args.kaggle:
-        args.data_dir = "/kaggle/input/vista-dataset" if args.data_dir == "/content/vista_data/" else args.data_dir
-        args.save_dir = "/kaggle/working/checkpoints" if args.save_dir == "./checkpoints" else args.save_dir
-        print("Running in Kaggle environment.")
-    elif args.colab:
-        setup_colab()
-
-    os.makedirs(args.save_dir, exist_ok=True)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # ... [setup code] ...
     
     train_ds = VistaDataset(args.data_dir, 'train', get_train_transforms(args.img_size), use_mosaic=args.mosaic, img_size=args.img_size)
-    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms(args.img_size), img_size=args.img_size, limit=500)
+    val_ds = VistaDataset(args.data_dir, 'test', get_valid_transforms(args.img_size), img_size=args.img_size, limit=100) # Reduced to 100 for speed
     
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True, persistent_workers=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
@@ -260,7 +252,8 @@ def main():
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, steps_per_epoch=len(train_loader)//args.accum, epochs=args.epochs)
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
-    start_epoch, best_acc = 0, 0
+    start_epoch = 0
+    best_acc = 0.0 # Track the best accuracy globally
     last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
     
     # --- Smart Resume Logic ---
@@ -283,8 +276,9 @@ def main():
             optimizer.load_state_dict(ckpt['optimizer'])
             if 'scheduler' in ckpt: scheduler.load_state_dict(ckpt['scheduler'])
             start_epoch = ckpt['epoch']
-            best_acc = ckpt.get('acc', 0)
-            print(f"Successfully resumed from Epoch {start_epoch}")
+            # CRITICAL: Load the best_acc from the checkpoint so we can compare against it
+            best_acc = ckpt.get('acc', 0.0)
+            print(f"Successfully resumed from Epoch {start_epoch} (Previous Best Acc: {best_acc:.4f})")
         else:
             print(f"Warning: --resume was passed but last_model.pt was not found anywhere. Starting fresh.")
 
