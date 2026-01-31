@@ -7,14 +7,27 @@ import pandas as pd
 import cv2
 import numpy as np
 from tqdm import tqdm
+from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, fasterrcnn_mobilenet_v3_large_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 def get_model(num_classes, model_path, device):
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights=None)
+    print(f"Loading checkpoint from {model_path}...")
+    checkpoint = torch.load(model_path, map_location=device)
+    
+    # Auto-detect architecture from checkpoint or default to resnet50
+    arch = checkpoint.get('arch', 'resnet50')
+    print(f"Detected architecture: {arch}")
+    
+    if arch == 'resnet50':
+        model = fasterrcnn_resnet50_fpn_v2(weights=None)
+    elif arch == 'mobilenet':
+        model = fasterrcnn_mobilenet_v3_large_fpn(weights=None)
+    else:
+        raise ValueError(f"Unknown architecture: {arch}")
+        
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     
-    checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint['model'])
     model.to(device)
     model.eval()

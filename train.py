@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.utils.data
 import torchvision
+from torchvision.models.detection import fasterrcnn_resnet50_fpn_v2, fasterrcnn_mobilenet_v3_large_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from tqdm import tqdm
 import albumentations as A
@@ -229,6 +230,7 @@ def main():
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--lr', default=0.0001, type=float)
     parser.add_argument('--img-size', default=640, type=int)
+    parser.add_argument('--model', default='mobilenet', choices=['resnet50', 'mobilenet'], help='Model architecture')
     parser.add_argument('--mosaic', action='store_true')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--colab', action='store_true')
@@ -251,9 +253,17 @@ def main():
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2, collate_fn=collate_fn, pin_memory=True, persistent_workers=True)
     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
-    print(f"WINNING MODE: ResNet50 | Size={args.img_size} | Mosaic={args.mosaic} | Accum={args.accum}")
-    model = torchvision.models.detection.fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
-    model.roi_heads.box_predictor = FastRCNNPredictor(model.roi_heads.box_predictor.cls_score.in_features, 201)
+    print(f"WINNING MODE: {args.model.upper()} | Size={args.img_size} | Mosaic={args.mosaic} | Accum={args.accum}")
+    
+    if args.model == 'resnet50':
+        model = fasterrcnn_resnet50_fpn_v2(weights="DEFAULT")
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+    else:
+        # Defaulting to MobileNetV3 Large FPN for speed
+        model = fasterrcnn_mobilenet_v3_large_fpn(weights="DEFAULT")
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, 201)
     model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -261,7 +271,7 @@ def main():
     scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     start_epoch, best_acc = 0, 0
-    last_ckpt_path = os.path.join(args.save_dir, "last_model.pt")
+    last_ckpt_path = os.path.join(args.save_dir, f"last_model_{args.model}.pt")
     
     # --- Smart Resume Logic ---
     if args.resume:
@@ -272,8 +282,8 @@ def main():
             # Kaggle specific: search for model in inputs if not in working dir
             print(f"Searching for checkpoint in Kaggle inputs...")
             for r, d, f in os.walk("/kaggle/input"):
-                if "last_model.pt" in f:
-                    found_path = os.path.join(r, "last_model.pt")
+                if f"last_model_{args.model}.pt" in f:
+                    found_path = os.path.join(r, f"last_model_{args.model}.pt")
                     break
         
         if found_path:
@@ -286,7 +296,7 @@ def main():
             best_acc = ckpt.get('acc', 0)
             print(f"Successfully resumed from Epoch {start_epoch}")
         else:
-            print(f"Warning: --resume was passed but last_model.pt was not found anywhere. Starting fresh.")
+            print(f"Warning: --resume was passed but last_model_{args.model}.pt was not found. Starting fresh.")
 
     for epoch in range(start_epoch, args.epochs):
         model.train(); train_loss = 0
@@ -319,13 +329,22 @@ def main():
         print(f"Official Codefest Score: {official_score:.4f} (at threshold {best_t})")
         print("="*40 + "\n")
 
-        ckpt = {'epoch': epoch + 1, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(), 
-                'scheduler': scheduler.state_dict(), 'acc': official_score, 'best_t': best_t}
+        # Save arch in checkpoint for inference
+        ckpt = {
+            'epoch': epoch + 1, 
+            'model': model.state_dict(), 
+            'optimizer': optimizer.state_dict(), 
+            'scheduler': scheduler.state_dict(), 
+            'acc': official_score, 
+            'best_t': best_t,
+            'arch': args.model
+        }
         torch.save(ckpt, last_ckpt_path)
         print(f"Checkpoint saved: {last_ckpt_path}")
         
         if official_score > best_acc:
-            best_acc = official_score; torch.save(ckpt, os.path.join(args.save_dir, "best_model.pt"))
+            best_acc = official_score
+            torch.save(ckpt, os.path.join(args.save_dir, f"best_model_{args.model}.pt"))
             print(f"*** NEW BEST MODEL SAVED with Codefest Score: {best_acc:.4f} ***")
 
 if __name__ == "__main__": main()
